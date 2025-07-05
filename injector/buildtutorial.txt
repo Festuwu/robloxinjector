@@ -1,0 +1,3 @@
+How to build the injector?
+simply open visual studio and the terminal and run: dotnet build
+if you have any problems with the building process simply ask chat gpt for help
