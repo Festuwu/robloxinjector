@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -24,43 +24,64 @@ namespace Injector
 
             Console.WriteLine("cat.dll found successfully!");
 
-            // Try multiple process names
             Process target = null;
-            string[] processNames = { "RobloxPlayerBeta", "Roblox", "Windows10Universal" };
             
-            foreach (string processName in processNames)
+            // If PID is provided as argument, use it for testing
+            if (args.Length > 0 && int.TryParse(args[0], out int testPid))
             {
-                target = Process.GetProcessesByName(processName).FirstOrDefault();
-                if (target != null)
+                try
                 {
-                    Console.WriteLine($"Found target process: {processName} (PID: {target.Id})");
-                    break;
+                    target = Process.GetProcessById(testPid);
+                    Console.WriteLine($"Using provided PID: {testPid} ({target.ProcessName})");
+                }
+                catch (ArgumentException)
+                {
+                    Console.WriteLine($"Process with PID {testPid} not found.");
+                    return;
                 }
             }
-
-            if (target == null)
+            else
             {
-                Console.WriteLine("No Roblox process found. Make sure Roblox is running.");
-                Console.WriteLine("Available processes:");
-                foreach (Process p in Process.GetProcesses())
+                // Try multiple process names
+                string[] processNames = { "RobloxPlayerBeta", "Roblox", "Windows10Universal" };
+                
+                foreach (string processName in processNames)
                 {
-                    if (p.ProcessName.ToLower().Contains("roblox"))
+                    target = Process.GetProcessesByName(processName).FirstOrDefault();
+                    if (target != null)
                     {
-                        Console.WriteLine($"  - {p.ProcessName} (PID: {p.Id})");
+                        Console.WriteLine($"Found target process: {processName} (PID: {target.Id})");
+                        break;
                     }
                 }
-                return;
+
+                if (target == null)
+                {
+                    Console.WriteLine("No Roblox process found. Make sure Roblox is running.");
+                    Console.WriteLine("Available processes:");
+                    foreach (Process p in Process.GetProcesses())
+                    {
+                        if (p.ProcessName.ToLower().Contains("roblox"))
+                        {
+                            Console.WriteLine($"  - {p.ProcessName} (PID: {p.Id})");
+                        }
+                    }
+                    Console.WriteLine("\nUsage: Injector.exe [PID] to inject into a specific process");
+                    return;
+                }
             }
 
             try
             {
                 Console.WriteLine($"Target PID: {target.Id}");
-                Console.WriteLine("Attempting DLL injection...");
-                InjectDll(target.Id, dllPath);
-                Console.WriteLine("DLL injected successfully!");
+                Console.WriteLine($"Target Process: {target.ProcessName}");
+                Console.WriteLine($"Target Architecture: {(Environment.Is64BitProcess ? "64-bit" : "32-bit")}");
                 Console.WriteLine("Suspending threads in ntdll.dll...");
                 SuspendThreadsInNtdll(target.Id);
                 Console.WriteLine("Threads in ntdll.dll suspended.");
+                Console.WriteLine("Attempting DLL injection...");
+                InjectDll(target.Id, dllPath);
+                Console.WriteLine("DLL injected successfully!");
                 Console.WriteLine("Check for a message box from the target process.");
             }
             catch (Exception ex)
@@ -72,22 +93,6 @@ namespace Injector
 
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out IntPtr lpNumberOfBytesWritten);
-
-        [DllImport("kernel32.dll")]
-        static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-
-        [DllImport("kernel32.dll")]
-        static extern IntPtr GetModuleHandle(string lpModuleName);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes,
-            uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out IntPtr lpThreadId);
 
         [DllImport("kernel32.dll")]
         static extern IntPtr OpenThread(ThreadAccess dwDesiredAccess, bool bInheritHandle, uint dwThreadId);
@@ -111,59 +116,43 @@ namespace Injector
 
         static void InjectDll(int pid, string dllPath)
         {
-            const int PROCESS_ALL_ACCESS = 0x1F0FFF;
-            const uint MEM_COMMIT = 0x1000;
-            const uint PAGE_READWRITE = 0x04;
-
-            Console.WriteLine($"Opening process {pid}...");
-            IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
-            if (hProcess == IntPtr.Zero)
-            {
-                uint error = GetLastError();
-                throw new Exception($"Cannot open process. Error code: {error}");
-            }
-
-            Console.WriteLine("Process opened successfully.");
-
-            byte[] dllBytes = System.Text.Encoding.ASCII.GetBytes(dllPath + "\0");
-            Console.WriteLine($"Allocating {dllBytes.Length} bytes in target process...");
+            Console.WriteLine($"Manual mapping DLL into process {pid}...");
             
-            IntPtr allocAddress = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllBytes.Length, MEM_COMMIT, PAGE_READWRITE);
-            if (allocAddress == IntPtr.Zero)
+            bool success = ManualMapper.ManualMapDll(pid, dllPath);
+            
+            if (success)
             {
-                uint error = GetLastError();
-                throw new Exception($"Memory allocation failed. Error code: {error}");
+                Console.WriteLine("Manual mapping completed successfully!");
+                
+                // Verify DLL was loaded by checking process modules
+                Console.WriteLine("Verifying DLL was loaded...");
+                try
+                {
+                    var targetProcess = Process.GetProcessById(pid);
+                    bool dllFound = false;
+                    foreach (ProcessModule module in targetProcess.Modules)
+                    {
+                        if (module.ModuleName.ToLower().Contains("cat.dll"))
+                        {
+                            Console.WriteLine($"DLL found in process: {module.ModuleName} at 0x{module.BaseAddress:X}");
+                            dllFound = true;
+                            break;
+                        }
+                    }
+                    if (!dllFound)
+                    {
+                        Console.WriteLine("Note: cat.dll may not appear in module list with manual mapping (this is normal)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: Could not verify DLL loading: {ex.Message}");
+                }
             }
-
-            Console.WriteLine($"Memory allocated at: 0x{allocAddress:X}");
-
-            IntPtr bytesWritten;
-            bool writeResult = WriteProcessMemory(hProcess, allocAddress, dllBytes, (uint)dllBytes.Length, out bytesWritten);
-            if (!writeResult)
+            else
             {
-                uint error = GetLastError();
-                throw new Exception($"WriteProcessMemory failed. Error code: {error}");
+                throw new Exception("Manual mapping failed");
             }
-
-            Console.WriteLine($"DLL path written to target process.");
-
-            // Get LoadLibraryA address
-            IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
-            if (loadLibraryAddr == IntPtr.Zero)
-                throw new Exception("LoadLibraryA address not found");
-
-            Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
-
-            // Create remote thread
-            IntPtr threadId = IntPtr.Zero;
-            IntPtr remoteThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, allocAddress, 0, out threadId);
-            if (remoteThread == IntPtr.Zero)
-            {
-                uint error = GetLastError();
-                throw new Exception($"CreateRemoteThread failed. Error code: {error}");
-            }
-
-            Console.WriteLine($"Remote thread created successfully. Thread ID: {threadId}");
         }
 
         static void SuspendThreadsInNtdll(int pid)
