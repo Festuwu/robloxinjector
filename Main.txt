@@ -1,0 +1,6 @@
+This is an very basic roblox injector. the dll might be broken so please make your own dll for this. THIS IS NOT AN EXECUTOR JUST AN INJECTOR.
+the cat.dll should create an message box on the roblox process if it doesnt it means its broken and i will fix it later.
+to use this you need an cat.dll and injector.exe to be in the same folder, run injector.exe as an administrator and it will work
+injector.exe will also make it so you can have cheat engine open while roblox is running and attach it to the game.
+your roblox might crash sometimes while using this injector i still dont know what is it coused by but i am working on fixing it.
+if you have any more questions dm me on discord username: festuwu
