@@ -8,15 +8,42 @@
 void LogToFileAndDebug(const std::string& msg) {
     // Output to debugger
     OutputDebugStringA(msg.c_str());
-    // Output to file
-    std::ofstream log("C:/cat_dll_log.txt", std::ios::app);
-    if (log.is_open()) {
-        // Add timestamp
-        std::time_t t = std::time(nullptr);
-        char timebuf[64];
-        std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
-        log << "[" << timebuf << "] " << msg << std::endl;
-        log.close();
+    
+    // Get the DLL's directory path
+    char dllPath[MAX_PATH];
+    HMODULE hModule = GetModuleHandleA("cat.dll");
+    if (hModule != NULL) {
+        GetModuleFileNameA(hModule, dllPath, MAX_PATH);
+        std::string dllPathStr(dllPath);
+        size_t lastSlash = dllPathStr.find_last_of("\\/");
+        if (lastSlash != std::string::npos) {
+            std::string dllDir = dllPathStr.substr(0, lastSlash + 1);
+            std::string logPath = dllDir + "cat_dll_log.txt";
+            
+            // Output to file in DLL directory
+            std::ofstream log(logPath, std::ios::app);
+            if (log.is_open()) {
+                // Add timestamp
+                std::time_t t = std::time(nullptr);
+                char timebuf[64];
+                std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+                log << "[" << timebuf << "] " << msg << std::endl;
+                log.close();
+            }
+        }
+    }
+    
+    // Fallback to C: drive if DLL path not found
+    if (hModule == NULL) {
+        std::ofstream log("C:/cat_dll_log.txt", std::ios::app);
+        if (log.is_open()) {
+            // Add timestamp
+            std::time_t t = std::time(nullptr);
+            char timebuf[64];
+            std::strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+            log << "[" << timebuf << "] " << msg << std::endl;
+            log.close();
+        }
     }
 }
 
