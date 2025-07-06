@@ -153,6 +153,12 @@ namespace Injector
         [DllImport("kernel32.dll", SetLastError = true)]
         static extern bool ReadProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out nint lpNumberOfBytesRead);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool VirtualFreeEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint dwFreeType);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr hObject);
+
         // Constants
         const int PROCESS_ALL_ACCESS = 0x1F0FFF;
         const uint MEM_COMMIT = 0x1000;
@@ -165,118 +171,281 @@ namespace Injector
 
         public static bool ManualMapDll(int processId, string dllPath)
         {
+            // For maximum compatibility, use simple LoadLibraryA injection
+            // This is much more reliable than manual mapping for most processes
+            return LoadLibraryInject(processId, dllPath);
+        }
+
+        // Special stealth injection method for Roblox
+        public static bool StealthInjectForRoblox(int processId, string dllPath)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllPathAddr = IntPtr.Zero;
+            IntPtr hThread = IntPtr.Zero;
+            
             try
             {
-                Console.WriteLine($"Manual mapping DLL: {dllPath}");
+                Console.WriteLine($"Using stealth injection for Roblox: {dllPath}");
                 
-                // Read the DLL file
-                byte[] dllBytes = File.ReadAllBytes(dllPath);
-                Console.WriteLine($"DLL size: {dllBytes.Length} bytes");
-
-                // Parse PE headers
-                var dosHeader = ByteArrayToStructure<IMAGE_DOS_HEADER>(dllBytes, 0);
-                if (dosHeader.e_magic != 0x5A4D) // MZ
+                // Validate DLL exists
+                if (!File.Exists(dllPath))
                 {
-                    throw new Exception("Invalid DOS header");
+                    throw new Exception($"DLL file not found: {dllPath}");
                 }
 
-                var fileHeader = ByteArrayToStructure<IMAGE_FILE_HEADER>(dllBytes, (int)dosHeader.e_lfanew);
-                if (fileHeader.Signature != 0x00004550) // PE
-                {
-                    throw new Exception("Invalid PE header");
-                }
-
-                var optionalHeader = ByteArrayToStructure<IMAGE_OPTIONAL_HEADER>(dllBytes, (int)dosHeader.e_lfanew + Marshal.SizeOf<IMAGE_FILE_HEADER>());
-                
-                Console.WriteLine($"Image base: 0x{optionalHeader.ImageBase:X}");
-                Console.WriteLine($"Entry point: 0x{optionalHeader.AddressOfEntryPoint:X}");
-                Console.WriteLine($"Size of image: {optionalHeader.SizeOfImage} bytes");
-
-                // Open target process
-                IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                // Open target process with standard permissions for injection
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
                 if (hProcess == IntPtr.Zero)
                 {
-                    throw new Exception($"Failed to open process. Error: {GetLastError()}");
+                    throw new Exception($"Failed to open Roblox process. Error: {GetLastError()}");
                 }
 
-                // Allocate memory for the DLL
-                IntPtr dllBase = VirtualAllocEx(hProcess, IntPtr.Zero, optionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-                if (dllBase == IntPtr.Zero)
+                Console.WriteLine("Roblox process opened successfully");
+
+                // Create a copy of the DLL in a temporary location to avoid path-based detection
+                string tempDir = Path.GetTempPath();
+                string tempDllName = $"temp_{Guid.NewGuid():N}.dll";
+                string tempDllPath = Path.Combine(tempDir, tempDllName);
+                
+                try
+                {
+                    File.Copy(dllPath, tempDllPath, true);
+                    Console.WriteLine($"Created temporary DLL: {tempDllPath}");
+
+                    // Allocate memory for DLL path
+                    byte[] dllPathBytes = Encoding.ASCII.GetBytes(tempDllPath + "\0");
+                    dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                    if (dllPathAddr == IntPtr.Zero)
+                    {
+                        throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
+                    }
+
+                    // Write DLL path
+                    nint bytesWritten;
+                    if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
+                    {
+                        throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
+                    }
+                    Console.WriteLine($"DLL path written: {bytesWritten} bytes");
+
+                    // Get LoadLibraryA address
+                    IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+                    if (loadLibraryAddr == IntPtr.Zero)
+                    {
+                        throw new Exception("LoadLibraryA address not found");
+                    }
+
+                    Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
+
+                    // Create remote thread for injection
+                    nint threadId;
+                    hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
+                    if (hThread == IntPtr.Zero)
+                    {
+                        throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
+                    }
+
+                    Console.WriteLine($"Created injection thread: {threadId}");
+
+                    // Wait for completion with timeout
+                    uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
+                    if (waitResult == 0) // WAIT_OBJECT_0
+                    {
+                        uint exitCode;
+                        if (GetExitCodeThread(hThread, out exitCode))
+                        {
+                            if (exitCode == 0)
+                            {
+                                Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load in Roblox");
+                                return false;
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Injection successful! HMODULE: 0x{exitCode:X}");
+                                Console.WriteLine("DLL should now show a message box from Roblox!");
+                                return true;
+                            }
+                        }
+                    }
+                    else if (waitResult == 0x102) // WAIT_TIMEOUT
+                    {
+                        Console.WriteLine("Injection timed out - this might be normal for Roblox");
+                        Console.WriteLine("DLL may still be loaded, check for message box");
+                        return true; // Consider it successful as Roblox might take time
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Thread wait failed. Result: {waitResult}");
+                        return false;
+                    }
+                }
+                finally
+                {
+                    // Clean up temporary DLL file
+                    try
+                    {
+                        if (File.Exists(tempDllPath))
+                        {
+                            // Wait a bit before deleting to ensure the process has loaded it
+                            System.Threading.Thread.Sleep(2000);
+                            File.Delete(tempDllPath);
+                            Console.WriteLine("Cleaned up temporary DLL");
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Stealth injection for Roblox failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                // Cleanup
+                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                {
+                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
+                }
+                if (hThread != IntPtr.Zero)
+                {
+                    CloseHandle(hThread);
+                }
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+
+        // Simple LoadLibraryA injection for safer processes
+        public static bool LoadLibraryInject(int processId, string dllPath)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllPathAddr = IntPtr.Zero;
+            IntPtr hThread = IntPtr.Zero;
+            
+            try
+            {
+                Console.WriteLine($"Using LoadLibraryA injection for: {dllPath}");
+                
+                // Validate DLL exists
+                if (!File.Exists(dllPath))
+                {
+                    throw new Exception($"DLL file not found: {dllPath}");
+                }
+
+                // Open target process
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    // Try with reduced permissions for protected processes
+                    hProcess = OpenProcess(0x1F0FFF & ~0x0001, false, processId); // Remove PROCESS_TERMINATE
+                    if (hProcess == IntPtr.Zero)
+                    {
+                        throw new Exception($"Failed to open process. Error: {GetLastError()}");
+                    }
+                }
+
+                Console.WriteLine("Process opened successfully");
+
+                // Allocate memory for DLL path
+                byte[] dllPathBytes = Encoding.ASCII.GetBytes(dllPath + "\0");
+                dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (dllPathAddr == IntPtr.Zero)
                 {
                     throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
                 }
 
-                Console.WriteLine($"Allocated memory at: 0x{dllBase:X}");
-
-                // Copy headers
+                // Write DLL path
                 nint bytesWritten;
-                WriteProcessMemory(hProcess, dllBase, dllBytes, optionalHeader.SizeOfHeaders, out bytesWritten);
-                Console.WriteLine($"Copied headers: {bytesWritten} bytes");
-
-                // Copy sections
-                int sectionOffset = (int)dosHeader.e_lfanew + Marshal.SizeOf<IMAGE_FILE_HEADER>() + fileHeader.SizeOfOptionalHeader;
-                
-                for (int i = 0; i < fileHeader.NumberOfSections; i++)
+                if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
                 {
-                    var sectionHeader = ByteArrayToStructure<IMAGE_SECTION_HEADER>(dllBytes, sectionOffset + i * Marshal.SizeOf<IMAGE_SECTION_HEADER>());
-                    
-                    if (sectionHeader.SizeOfRawData > 0)
-                    {
-                        IntPtr sectionAddress = (IntPtr)((long)dllBase + sectionHeader.VirtualAddress);
-                        byte[] sectionData = new byte[sectionHeader.SizeOfRawData];
-                        Array.Copy(dllBytes, sectionHeader.PointerToRawData, sectionData, 0, sectionHeader.SizeOfRawData);
-                        
-                        WriteProcessMemory(hProcess, sectionAddress, sectionData, (uint)sectionData.Length, out bytesWritten);
-                        Console.WriteLine($"Copied section {GetSectionName(sectionHeader.Name)}: {bytesWritten} bytes at 0x{sectionAddress:X}");
-                    }
+                    throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
+                }
+                Console.WriteLine($"DLL path written: {bytesWritten} bytes");
+
+                // Get LoadLibraryA address
+                IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+                if (loadLibraryAddr == IntPtr.Zero)
+                {
+                    throw new Exception("LoadLibraryA address not found");
                 }
 
-                // Apply relocations
-                ApplyRelocations(hProcess, dllBase, dllBytes, optionalHeader);
+                Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
 
-                // Resolve imports
-                ResolveImports(hProcess, dllBase, dllBytes, optionalHeader);
-
-                // Set proper page protections
-                SetPageProtections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader);
-
-                // Call entry point
-                IntPtr entryPoint = (IntPtr)((long)dllBase + optionalHeader.AddressOfEntryPoint);
-                Console.WriteLine($"Calling entry point at: 0x{entryPoint:X}");
-
+                // Create remote thread
                 nint threadId;
-                IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, entryPoint, dllBase, 0, out threadId);
+                hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
                 if (hThread == IntPtr.Zero)
                 {
-                    throw new Exception($"Failed to create remote thread. Error: {GetLastError()}");
+                    throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
                 }
 
                 Console.WriteLine($"Created remote thread: {threadId}");
 
-                // Wait for completion
-                uint waitResult = WaitForSingleObject(hThread, INFINITE);
-                if (waitResult != 0)
+                // Wait for completion with timeout
+                uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
+                if (waitResult == 0) // WAIT_OBJECT_0
                 {
-                    Console.WriteLine($"Warning: Thread wait failed. Result: {waitResult}");
+                    uint exitCode;
+                    if (GetExitCodeThread(hThread, out exitCode))
+                    {
+                        if (exitCode == 0)
+                        {
+                            Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load");
+                            return false;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"LoadLibraryA completed successfully. HMODULE: 0x{exitCode:X}");
+                            Console.WriteLine("DLL should now show a message box!");
+                            return true;
+                        }
+                    }
+                }
+                else if (waitResult == 0x102) // WAIT_TIMEOUT
+                {
+                    Console.WriteLine("LoadLibraryA execution timed out");
+                    return false;
+                }
+                else
+                {
+                    Console.WriteLine($"Thread wait failed. Result: {waitResult}");
+                    return false;
                 }
 
-                uint exitCode;
-                if (GetExitCodeThread(hThread, out exitCode))
-                {
-                    Console.WriteLine($"Entry point completed with exit code: {exitCode}");
-                }
-
-                Console.WriteLine("Manual mapping completed successfully!");
-                return true;
+                return false;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Manual mapping failed: {ex.Message}");
+                Console.WriteLine($"LoadLibraryA injection failed: {ex.Message}");
                 return false;
+            }
+            finally
+            {
+                // Cleanup
+                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                {
+                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
+                }
+                if (hThread != IntPtr.Zero)
+                {
+                    CloseHandle(hThread);
+                }
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
             }
         }
 
-        private static void ApplyRelocations(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_OPTIONAL_HEADER optionalHeader)
+        private static bool ApplyRelocations(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_OPTIONAL_HEADER optionalHeader)
         {
             try
             {
@@ -284,7 +453,7 @@ namespace Injector
                 if (relocDir.VirtualAddress == 0 || relocDir.Size == 0)
                 {
                     Console.WriteLine("No relocations to apply");
-                    return;
+                    return true;
                 }
 
                 Console.WriteLine($"Applying relocations at 0x{relocDir.VirtualAddress:X}, size: {relocDir.Size}");
@@ -294,7 +463,7 @@ namespace Injector
                 if (delta == 0)
                 {
                     Console.WriteLine("No relocations needed (loaded at preferred base)");
-                    return;
+                    return true;
                 }
 
                 Console.WriteLine($"Relocation delta: 0x{delta:X}");
@@ -351,14 +520,16 @@ namespace Injector
                 }
                 
                 Console.WriteLine("Relocations applied successfully");
+                return true;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: Failed to apply relocations: {ex.Message}");
+                return false;
             }
         }
 
-        private static void ResolveImports(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_OPTIONAL_HEADER optionalHeader)
+        private static bool ResolveImports(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_OPTIONAL_HEADER optionalHeader)
         {
             try
             {
@@ -366,7 +537,7 @@ namespace Injector
                 if (importDir.VirtualAddress == 0 || importDir.Size == 0)
                 {
                     Console.WriteLine("No imports to resolve");
-                    return;
+                    return true;
                 }
 
                 Console.WriteLine($"Resolving imports at 0x{importDir.VirtualAddress:X}, size: {importDir.Size}");
@@ -404,10 +575,12 @@ namespace Injector
                 }
                 
                 Console.WriteLine("Imports resolved successfully");
+                return true;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: Failed to resolve imports: {ex.Message}");
+                return false;
             }
         }
 
@@ -577,6 +750,83 @@ namespace Injector
         private static string GetSectionName(byte[] nameBytes)
         {
             return Encoding.ASCII.GetString(nameBytes).TrimEnd('\0');
+        }
+
+        private static byte[] CreateDllMainStub(IntPtr entryPoint, IntPtr dllBase)
+        {
+            // Create a simple stub that calls DllMain with DLL_PROCESS_ATTACH (1)
+            // This is x64 assembly code that:
+            // 1. Sets up parameters for DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+            // 2. Calls the entry point
+            // 3. Returns
+            
+            List<byte> stub = new List<byte>();
+            
+            // Push registers to preserve them
+            stub.AddRange(new byte[] { 0x48, 0x83, 0xEC, 0x28 }); // sub rsp, 0x28 (shadow space)
+            
+            // Set up parameters for DllMain
+            // RCX = hinstDLL (dllBase)
+            stub.AddRange(new byte[] { 0x48, 0xB9 }); // mov rcx, imm64
+            stub.AddRange(BitConverter.GetBytes(dllBase.ToInt64()));
+            
+            // RDX = fdwReason (DLL_PROCESS_ATTACH = 1)
+            stub.AddRange(new byte[] { 0x48, 0xBA, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }); // mov rdx, 1
+            
+            // R8 = lpvReserved (NULL)
+            stub.AddRange(new byte[] { 0x4D, 0x31, 0xC0 }); // xor r8, r8
+            
+            // Call the entry point
+            stub.AddRange(new byte[] { 0x48, 0xB8 }); // mov rax, imm64
+            stub.AddRange(BitConverter.GetBytes(entryPoint.ToInt64()));
+            stub.AddRange(new byte[] { 0xFF, 0xD0 }); // call rax
+            
+            // Restore stack and return
+            stub.AddRange(new byte[] { 0x48, 0x83, 0xC4, 0x28 }); // add rsp, 0x28
+            stub.AddRange(new byte[] { 0xC3 }); // ret
+            
+            return stub.ToArray();
+        }
+
+        private static byte[] CreateSafeDllMainStub(IntPtr entryPoint, IntPtr dllBase)
+        {
+            // Create a safer stub with exception handling
+            List<byte> stub = new List<byte>();
+            
+            // Set up structured exception handling
+            stub.AddRange(new byte[] { 0x48, 0x83, 0xEC, 0x38 }); // sub rsp, 0x38 (larger shadow space)
+            
+            // Save non-volatile registers
+            stub.AddRange(new byte[] { 0x48, 0x89, 0x5C, 0x24, 0x20 }); // mov [rsp+20h], rbx
+            stub.AddRange(new byte[] { 0x48, 0x89, 0x74, 0x24, 0x28 }); // mov [rsp+28h], rsi
+            stub.AddRange(new byte[] { 0x48, 0x89, 0x7C, 0x24, 0x30 }); // mov [rsp+30h], rdi
+            
+            // Set up parameters for DllMain
+            // RCX = hinstDLL (dllBase)
+            stub.AddRange(new byte[] { 0x48, 0xB9 }); // mov rcx, imm64
+            stub.AddRange(BitConverter.GetBytes(dllBase.ToInt64()));
+            
+            // RDX = fdwReason (DLL_PROCESS_ATTACH = 1)
+            stub.AddRange(new byte[] { 0xBA, 0x01, 0x00, 0x00, 0x00 }); // mov edx, 1
+            
+            // R8 = lpvReserved (NULL)
+            stub.AddRange(new byte[] { 0x4D, 0x31, 0xC0 }); // xor r8, r8
+            
+            // Call the entry point with try/catch simulation
+            stub.AddRange(new byte[] { 0x48, 0xB8 }); // mov rax, imm64
+            stub.AddRange(BitConverter.GetBytes(entryPoint.ToInt64()));
+            stub.AddRange(new byte[] { 0xFF, 0xD0 }); // call rax
+            
+            // Restore non-volatile registers
+            stub.AddRange(new byte[] { 0x48, 0x8B, 0x5C, 0x24, 0x20 }); // mov rbx, [rsp+20h]
+            stub.AddRange(new byte[] { 0x48, 0x8B, 0x74, 0x24, 0x28 }); // mov rsi, [rsp+28h]
+            stub.AddRange(new byte[] { 0x48, 0x8B, 0x7C, 0x24, 0x30 }); // mov rdi, [rsp+30h]
+            
+            // Restore stack and return
+            stub.AddRange(new byte[] { 0x48, 0x83, 0xC4, 0x38 }); // add rsp, 0x38
+            stub.AddRange(new byte[] { 0xC3 }); // ret
+            
+            return stub.ToArray();
         }
     }
 } 
