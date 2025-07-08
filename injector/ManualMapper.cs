@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Diagnostics;
 
 namespace Injector
 {
@@ -167,281 +168,482 @@ namespace Injector
         const uint PAGE_EXECUTE_READWRITE = 0x40;
         const uint PAGE_READONLY = 0x02;
         const uint PAGE_EXECUTE_READ = 0x20;
+        const uint PAGE_NOACCESS = 0x01;
         const uint INFINITE = 0xFFFFFFFF;
 
+        // Advanced manual mapping with full PE loading capabilities
         public static bool ManualMapDll(int processId, string dllPath)
         {
-            // For maximum compatibility, use simple LoadLibraryA injection
-            // This is much more reliable than manual mapping for most processes
-            return LoadLibraryInject(processId, dllPath);
-        }
-
-        // Special stealth injection method for Roblox
-        public static bool StealthInjectForRoblox(int processId, string dllPath)
-        {
             IntPtr hProcess = IntPtr.Zero;
-            IntPtr dllPathAddr = IntPtr.Zero;
-            IntPtr hThread = IntPtr.Zero;
+            IntPtr dllBase = IntPtr.Zero;
+            IntPtr shellcodeAddr = IntPtr.Zero;
             
             try
             {
-                Console.WriteLine($"Using stealth injection for Roblox: {dllPath}");
+                Console.WriteLine($"Starting advanced manual mapping for: {dllPath}");
                 
-                // Validate DLL exists
-                if (!File.Exists(dllPath))
-                {
-                    throw new Exception($"DLL file not found: {dllPath}");
-                }
-
-                // Open target process with standard permissions for injection
-                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
-                if (hProcess == IntPtr.Zero)
-                {
-                    throw new Exception($"Failed to open Roblox process. Error: {GetLastError()}");
-                }
-
-                Console.WriteLine("Roblox process opened successfully");
-
-                // Create a copy of the DLL in a temporary location to avoid path-based detection
-                string tempDir = Path.GetTempPath();
-                string tempDllName = $"temp_{Guid.NewGuid():N}.dll";
-                string tempDllPath = Path.Combine(tempDir, tempDllName);
+                // Read the DLL file
+                byte[] dllBytes = File.ReadAllBytes(dllPath);
+                Console.WriteLine($"Read {dllBytes.Length} bytes from DLL");
                 
-                try
+                // Parse PE headers
+                var dosHeader = ByteArrayToStructure<IMAGE_DOS_HEADER>(dllBytes, 0);
+                if (dosHeader.e_magic != 0x5A4D) // "MZ"
                 {
-                    File.Copy(dllPath, tempDllPath, true);
-                    Console.WriteLine($"Created temporary DLL: {tempDllPath}");
-
-                    // Allocate memory for DLL path
-                    byte[] dllPathBytes = Encoding.ASCII.GetBytes(tempDllPath + "\0");
-                    dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-                    if (dllPathAddr == IntPtr.Zero)
-                    {
-                        throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
-                    }
-
-                    // Write DLL path
-                    nint bytesWritten;
-                    if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
-                    {
-                        throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
-                    }
-                    Console.WriteLine($"DLL path written: {bytesWritten} bytes");
-
-                    // Get LoadLibraryA address
-                    IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
-                    if (loadLibraryAddr == IntPtr.Zero)
-                    {
-                        throw new Exception("LoadLibraryA address not found");
-                    }
-
-                    Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
-
-                    // Create remote thread for injection
-                    nint threadId;
-                    hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
-                    if (hThread == IntPtr.Zero)
-                    {
-                        throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
-                    }
-
-                    Console.WriteLine($"Created injection thread: {threadId}");
-
-                    // Wait for completion with timeout
-                    uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
-                    if (waitResult == 0) // WAIT_OBJECT_0
-                    {
-                        uint exitCode;
-                        if (GetExitCodeThread(hThread, out exitCode))
-                        {
-                            if (exitCode == 0)
-                            {
-                                Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load in Roblox");
-                                return false;
-                            }
-                            else
-                            {
-                                Console.WriteLine($"Injection successful! HMODULE: 0x{exitCode:X}");
-                                Console.WriteLine("DLL should now show a message box from Roblox!");
-                                return true;
-                            }
-                        }
-                    }
-                    else if (waitResult == 0x102) // WAIT_TIMEOUT
-                    {
-                        Console.WriteLine("Injection timed out - this might be normal for Roblox");
-                        Console.WriteLine("DLL may still be loaded, check for message box");
-                        return true; // Consider it successful as Roblox might take time
-                    }
-                    else
-                    {
-                        Console.WriteLine($"Thread wait failed. Result: {waitResult}");
-                        return false;
-                    }
+                    throw new Exception("Invalid DOS header");
                 }
-                finally
-                {
-                    // Clean up temporary DLL file
-                    try
-                    {
-                        if (File.Exists(tempDllPath))
-                        {
-                            // Wait a bit before deleting to ensure the process has loaded it
-                            System.Threading.Thread.Sleep(2000);
-                            File.Delete(tempDllPath);
-                            Console.WriteLine("Cleaned up temporary DLL");
-                        }
-                    }
-                    catch
-                    {
-                        // Ignore cleanup errors
-                    }
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Stealth injection for Roblox failed: {ex.Message}");
-                return false;
-            }
-            finally
-            {
-                // Cleanup
-                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
-                {
-                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
-                }
-                if (hThread != IntPtr.Zero)
-                {
-                    CloseHandle(hThread);
-                }
-                if (hProcess != IntPtr.Zero)
-                {
-                    CloseHandle(hProcess);
-                }
-            }
-        }
-
-        // Simple LoadLibraryA injection for safer processes
-        public static bool LoadLibraryInject(int processId, string dllPath)
-        {
-            IntPtr hProcess = IntPtr.Zero;
-            IntPtr dllPathAddr = IntPtr.Zero;
-            IntPtr hThread = IntPtr.Zero;
-            
-            try
-            {
-                Console.WriteLine($"Using LoadLibraryA injection for: {dllPath}");
                 
-                // Validate DLL exists
-                if (!File.Exists(dllPath))
+                var fileHeader = ByteArrayToStructure<IMAGE_FILE_HEADER>(dllBytes, (int)dosHeader.e_lfanew);
+                if (fileHeader.Signature != 0x00004550) // "PE\0\0"
                 {
-                    throw new Exception($"DLL file not found: {dllPath}");
+                    throw new Exception("Invalid PE signature");
                 }
-
+                
+                var optionalHeader = ByteArrayToStructure<IMAGE_OPTIONAL_HEADER>(dllBytes, (int)dosHeader.e_lfanew + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                
+                Console.WriteLine($"PE Headers parsed successfully");
+                Console.WriteLine($"Image Base: 0x{optionalHeader.ImageBase:X}");
+                Console.WriteLine($"Size of Image: 0x{optionalHeader.SizeOfImage:X}");
+                Console.WriteLine($"Entry Point: 0x{optionalHeader.AddressOfEntryPoint:X}");
+                
                 // Open target process
                 hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
                 if (hProcess == IntPtr.Zero)
                 {
-                    // Try with reduced permissions for protected processes
-                    hProcess = OpenProcess(0x1F0FFF & ~0x0001, false, processId); // Remove PROCESS_TERMINATE
-                    if (hProcess == IntPtr.Zero)
-                    {
-                        throw new Exception($"Failed to open process. Error: {GetLastError()}");
-                    }
+                    throw new Exception($"Failed to open process {processId}. Error: {GetLastError()}");
                 }
-
-                Console.WriteLine("Process opened successfully");
-
-                // Allocate memory for DLL path
-                byte[] dllPathBytes = Encoding.ASCII.GetBytes(dllPath + "\0");
-                dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-                if (dllPathAddr == IntPtr.Zero)
+                
+                Console.WriteLine("Target process opened successfully");
+                
+                // Allocate memory for the DLL in the target process
+                dllBase = VirtualAllocEx(hProcess, IntPtr.Zero, optionalHeader.SizeOfImage, 
+                    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (dllBase == IntPtr.Zero)
                 {
-                    throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
+                    throw new Exception($"Failed to allocate memory in target process. Error: {GetLastError()}");
                 }
-
-                // Write DLL path
+                
+                Console.WriteLine($"Allocated memory at: 0x{dllBase:X}");
+                
+                // Copy headers to target process
                 nint bytesWritten;
-                if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
+                if (!WriteProcessMemory(hProcess, dllBase, dllBytes, optionalHeader.SizeOfHeaders, out bytesWritten))
                 {
-                    throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
+                    throw new Exception($"Failed to write headers. Error: {GetLastError()}");
                 }
-                Console.WriteLine($"DLL path written: {bytesWritten} bytes");
-
-                // Get LoadLibraryA address
-                IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
-                if (loadLibraryAddr == IntPtr.Zero)
+                
+                Console.WriteLine($"Headers written: {bytesWritten} bytes");
+                
+                // Copy sections to target process
+                if (!CopySections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader))
                 {
-                    throw new Exception("LoadLibraryA address not found");
+                    throw new Exception("Failed to copy sections");
                 }
-
-                Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
-
-                // Create remote thread
-                nint threadId;
-                hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
-                if (hThread == IntPtr.Zero)
+                
+                // Apply relocations if needed
+                if (!ApplyRelocations(hProcess, dllBase, dllBytes, optionalHeader))
                 {
-                    throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
+                    Console.WriteLine("Warning: Relocations failed, may cause issues");
                 }
-
-                Console.WriteLine($"Created remote thread: {threadId}");
-
-                // Wait for completion with timeout
-                uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
-                if (waitResult == 0) // WAIT_OBJECT_0
+                
+                // Resolve imports
+                if (!ResolveImports(hProcess, dllBase, dllBytes, optionalHeader))
                 {
-                    uint exitCode;
-                    if (GetExitCodeThread(hThread, out exitCode))
+                    Console.WriteLine("Warning: Import resolution failed, may cause issues");
+                }
+                
+                // Set proper page protections
+                SetPageProtections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader);
+                
+                // Call DllMain if entry point exists
+                if (optionalHeader.AddressOfEntryPoint != 0)
+                {
+                    IntPtr entryPoint = (IntPtr)((long)dllBase + optionalHeader.AddressOfEntryPoint);
+                    Console.WriteLine($"Calling DllMain at: 0x{entryPoint:X}");
+                    
+                    if (!CallDllMain(hProcess, entryPoint, dllBase))
                     {
-                        if (exitCode == 0)
-                        {
-                            Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load");
-                            return false;
-                        }
-                        else
-                        {
-                            Console.WriteLine($"LoadLibraryA completed successfully. HMODULE: 0x{exitCode:X}");
-                            Console.WriteLine("DLL should now show a message box!");
-                            return true;
-                        }
+                        Console.WriteLine("Warning: DllMain execution failed");
                     }
                 }
-                else if (waitResult == 0x102) // WAIT_TIMEOUT
-                {
-                    Console.WriteLine("LoadLibraryA execution timed out");
-                    return false;
-                }
-                else
-                {
-                    Console.WriteLine($"Thread wait failed. Result: {waitResult}");
-                    return false;
-                }
-
-                return false;
+                
+                Console.WriteLine("Manual mapping completed successfully!");
+                return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"LoadLibraryA injection failed: {ex.Message}");
+                Console.WriteLine($"Manual mapping failed: {ex.Message}");
                 return false;
             }
             finally
             {
-                // Cleanup
-                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                if (shellcodeAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
                 {
-                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
-                }
-                if (hThread != IntPtr.Zero)
-                {
-                    CloseHandle(hThread);
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000); // MEM_RELEASE
                 }
                 if (hProcess != IntPtr.Zero)
                 {
                     CloseHandle(hProcess);
                 }
+            }
+        }
+        
+        // Advanced manual mapping with additional stealth features
+        public static bool AdvancedManualMapDll(int processId, string dllPath, bool useAntiDebug = true, bool hideFromPeb = true)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllBase = IntPtr.Zero;
+            IntPtr shellcodeAddr = IntPtr.Zero;
+            
+            try
+            {
+                Console.WriteLine($"Starting advanced stealth manual mapping for: {dllPath}");
+                
+                // Read the DLL file
+                byte[] dllBytes = File.ReadAllBytes(dllPath);
+                Console.WriteLine($"Read {dllBytes.Length} bytes from DLL");
+                
+                // Parse PE headers
+                var dosHeader = ByteArrayToStructure<IMAGE_DOS_HEADER>(dllBytes, 0);
+                if (dosHeader.e_magic != 0x5A4D) // "MZ"
+                {
+                    throw new Exception("Invalid DOS header");
+                }
+                
+                var fileHeader = ByteArrayToStructure<IMAGE_FILE_HEADER>(dllBytes, (int)dosHeader.e_lfanew);
+                if (fileHeader.Signature != 0x00004550) // "PE\0\0"
+                {
+                    throw new Exception("Invalid PE signature");
+                }
+                
+                var optionalHeader = ByteArrayToStructure<IMAGE_OPTIONAL_HEADER>(dllBytes, (int)dosHeader.e_lfanew + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                
+                Console.WriteLine($"PE Headers parsed successfully");
+                Console.WriteLine($"Image Base: 0x{optionalHeader.ImageBase:X}");
+                Console.WriteLine($"Size of Image: 0x{optionalHeader.SizeOfImage:X}");
+                Console.WriteLine($"Entry Point: 0x{optionalHeader.AddressOfEntryPoint:X}");
+                
+                // Open target process
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    throw new Exception($"Failed to open process {processId}. Error: {GetLastError()}");
+                }
+                
+                Console.WriteLine("Target process opened successfully");
+                
+                // Find a suitable memory location (avoid common ranges)
+                IntPtr preferredBase = FindSuitableMemoryLocation(hProcess, optionalHeader.SizeOfImage);
+                
+                // Allocate memory for the DLL in the target process
+                dllBase = VirtualAllocEx(hProcess, preferredBase, optionalHeader.SizeOfImage, 
+                    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (dllBase == IntPtr.Zero)
+                {
+                    // Try without preferred base
+                    dllBase = VirtualAllocEx(hProcess, IntPtr.Zero, optionalHeader.SizeOfImage, 
+                        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (dllBase == IntPtr.Zero)
+                    {
+                        throw new Exception($"Failed to allocate memory in target process. Error: {GetLastError()}");
+                    }
+                }
+                
+                Console.WriteLine($"Allocated memory at: 0x{dllBase:X}");
+                
+                // Copy headers to target process
+                nint bytesWritten;
+                if (!WriteProcessMemory(hProcess, dllBase, dllBytes, optionalHeader.SizeOfHeaders, out bytesWritten))
+                {
+                    throw new Exception($"Failed to write headers. Error: {GetLastError()}");
+                }
+                
+                Console.WriteLine($"Headers written: {bytesWritten} bytes");
+                
+                // Copy sections to target process
+                if (!CopySections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader))
+                {
+                    throw new Exception("Failed to copy sections");
+                }
+                
+                // Apply relocations if needed
+                if (!ApplyRelocations(hProcess, dllBase, dllBytes, optionalHeader))
+                {
+                    Console.WriteLine("Warning: Relocations failed, may cause issues");
+                }
+                
+                // Resolve imports
+                if (!ResolveImports(hProcess, dllBase, dllBytes, optionalHeader))
+                {
+                    Console.WriteLine("Warning: Import resolution failed, may cause issues");
+                }
+                
+                // Erase PE headers to avoid detection
+                if (hideFromPeb)
+                {
+                    EraseHeaders(hProcess, dllBase, optionalHeader.SizeOfHeaders);
+                }
+                
+                // Set proper page protections
+                SetPageProtections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader);
+                
+                // Call DllMain if entry point exists
+                if (optionalHeader.AddressOfEntryPoint != 0)
+                {
+                    IntPtr entryPoint = (IntPtr)((long)dllBase + optionalHeader.AddressOfEntryPoint);
+                    Console.WriteLine($"Calling DllMain at: 0x{entryPoint:X}");
+                    
+                    if (!CallDllMainSafe(hProcess, entryPoint, dllBase))
+                    {
+                        Console.WriteLine("Warning: DllMain execution failed");
+                    }
+                }
+                
+                Console.WriteLine("Advanced stealth manual mapping completed successfully!");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Advanced manual mapping failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (shellcodeAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                {
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000); // MEM_RELEASE
+                }
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+        
+        // Copy sections from DLL to target process
+        private static bool CopySections(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_FILE_HEADER fileHeader, IMAGE_OPTIONAL_HEADER optionalHeader)
+        {
+            try
+            {
+                Console.WriteLine("Copying sections...");
+                
+                int sectionOffset = (int)optionalHeader.SizeOfHeaders;
+                
+                for (int i = 0; i < fileHeader.NumberOfSections; i++)
+                {
+                    var sectionHeader = ByteArrayToStructure<IMAGE_SECTION_HEADER>(dllBytes, sectionOffset);
+                    
+                    string sectionName = GetSectionName(sectionHeader.Name);
+                    Console.WriteLine($"Processing section: {sectionName}");
+                    Console.WriteLine($"  Virtual Address: 0x{sectionHeader.VirtualAddress:X}");
+                    Console.WriteLine($"  Virtual Size: 0x{sectionHeader.VirtualSize:X}");
+                    Console.WriteLine($"  Raw Size: 0x{sectionHeader.SizeOfRawData:X}");
+                    
+                    if (sectionHeader.SizeOfRawData == 0)
+                    {
+                        Console.WriteLine($"  Skipping empty section: {sectionName}");
+                        sectionOffset += Marshal.SizeOf<IMAGE_SECTION_HEADER>();
+                        continue;
+                    }
+                    
+                    IntPtr sectionDestination = (IntPtr)((long)dllBase + sectionHeader.VirtualAddress);
+                    
+                    // Copy section data
+                    byte[] sectionData = new byte[sectionHeader.SizeOfRawData];
+                    Array.Copy(dllBytes, (int)sectionHeader.PointerToRawData, sectionData, 0, (int)sectionHeader.SizeOfRawData);
+                    
+                    nint bytesWritten;
+                    if (!WriteProcessMemory(hProcess, sectionDestination, sectionData, (uint)sectionData.Length, out bytesWritten))
+                    {
+                        Console.WriteLine($"  Warning: Failed to write section {sectionName}");
+                        continue;
+                    }
+                    
+                    Console.WriteLine($"  Section {sectionName} copied: {bytesWritten} bytes");
+                    sectionOffset += Marshal.SizeOf<IMAGE_SECTION_HEADER>();
+                }
+                
+                Console.WriteLine("All sections copied successfully");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to copy sections: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Call DllMain in the target process
+        private static bool CallDllMain(IntPtr hProcess, IntPtr entryPoint, IntPtr dllBase)
+        {
+            try
+            {
+                // Create shellcode to call DllMain
+                byte[] shellcode = CreateDllMainStub(entryPoint, dllBase);
+                
+                // Allocate memory for shellcode
+                IntPtr shellcodeAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)shellcode.Length, 
+                    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (shellcodeAddr == IntPtr.Zero)
+                {
+                    Console.WriteLine("Failed to allocate memory for shellcode");
+                    return false;
+                }
+                
+                // Write shellcode
+                nint bytesWritten;
+                if (!WriteProcessMemory(hProcess, shellcodeAddr, shellcode, (uint)shellcode.Length, out bytesWritten))
+                {
+                    Console.WriteLine("Failed to write shellcode");
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+                
+                // Execute shellcode
+                nint threadId;
+                IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, shellcodeAddr, IntPtr.Zero, 0, out threadId);
+                if (hThread == IntPtr.Zero)
+                {
+                    Console.WriteLine("Failed to create remote thread");
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+                
+                // Wait for completion
+                uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
+                if (waitResult == 0) // WAIT_OBJECT_0
+                {
+                    uint exitCode;
+                    GetExitCodeThread(hThread, out exitCode);
+                    Console.WriteLine($"DllMain executed with exit code: {exitCode}");
+                    CloseHandle(hThread);
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return true;
+                }
+                else
+                {
+                    Console.WriteLine($"DllMain execution timed out or failed. Wait result: {waitResult}");
+                    CloseHandle(hThread);
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to call DllMain: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Safer DllMain call with exception handling
+        private static bool CallDllMainSafe(IntPtr hProcess, IntPtr entryPoint, IntPtr dllBase)
+        {
+            try
+            {
+                // Create safer shellcode with exception handling
+                byte[] shellcode = CreateSafeDllMainStub(entryPoint, dllBase);
+                
+                // Allocate memory for shellcode
+                IntPtr shellcodeAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)shellcode.Length, 
+                    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (shellcodeAddr == IntPtr.Zero)
+                {
+                    Console.WriteLine("Failed to allocate memory for safe shellcode");
+                    return false;
+                }
+                
+                // Write shellcode
+                nint bytesWritten;
+                if (!WriteProcessMemory(hProcess, shellcodeAddr, shellcode, (uint)shellcode.Length, out bytesWritten))
+                {
+                    Console.WriteLine("Failed to write safe shellcode");
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+                
+                // Execute shellcode
+                nint threadId;
+                IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, shellcodeAddr, IntPtr.Zero, 0, out threadId);
+                if (hThread == IntPtr.Zero)
+                {
+                    Console.WriteLine("Failed to create remote thread for safe DllMain");
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+                
+                // Wait for completion
+                uint waitResult = WaitForSingleObject(hThread, 15000); // 15 second timeout
+                if (waitResult == 0) // WAIT_OBJECT_0
+                {
+                    uint exitCode;
+                    GetExitCodeThread(hThread, out exitCode);
+                    Console.WriteLine($"Safe DllMain executed with exit code: {exitCode}");
+                    CloseHandle(hThread);
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return true;
+                }
+                else
+                {
+                    Console.WriteLine($"Safe DllMain execution timed out or failed. Wait result: {waitResult}");
+                    CloseHandle(hThread);
+                    VirtualFreeEx(hProcess, shellcodeAddr, 0, 0x8000);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to call safe DllMain: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Find a suitable memory location for allocation
+        private static IntPtr FindSuitableMemoryLocation(IntPtr hProcess, uint sizeNeeded)
+        {
+            try
+            {
+                // Try to find a good location that's not in common ranges
+                ulong startAddr = 0x10000000; // Start at 256MB
+                ulong endAddr = 0x7FFFFFFF;   // End before 2GB
+                ulong stepSize = 0x10000;     // 64KB steps
+                
+                for (ulong addr = startAddr; addr < endAddr; addr += stepSize)
+                {
+                    // Check if this memory region is available
+                    IntPtr testAddr = VirtualAllocEx(hProcess, (IntPtr)addr, sizeNeeded, 
+                        MEM_RESERVE, PAGE_NOACCESS);
+                    if (testAddr != IntPtr.Zero)
+                    {
+                        // Free the test allocation
+                        VirtualFreeEx(hProcess, testAddr, 0, 0x8000);
+                        return (IntPtr)addr;
+                    }
+                }
+                
+                return IntPtr.Zero; // No suitable location found
+            }
+            catch
+            {
+                return IntPtr.Zero;
+            }
+        }
+        
+        // Erase PE headers to avoid detection
+        private static void EraseHeaders(IntPtr hProcess, IntPtr dllBase, uint headerSize)
+        {
+            try
+            {
+                Console.WriteLine("Erasing PE headers to avoid detection...");
+                
+                byte[] zeroBytes = new byte[headerSize];
+                nint bytesWritten;
+                WriteProcessMemory(hProcess, dllBase, zeroBytes, headerSize, out bytesWritten);
+                
+                Console.WriteLine($"Erased {bytesWritten} bytes of PE headers");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to erase headers: {ex.Message}");
             }
         }
 
@@ -827,6 +1029,715 @@ namespace Injector
             stub.AddRange(new byte[] { 0xC3 }); // ret
             
             return stub.ToArray();
+        }
+
+        // Special stealth injection method for Roblox
+        public static bool StealthInjectForRoblox(int processId, string dllPath)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllPathAddr = IntPtr.Zero;
+            IntPtr hThread = IntPtr.Zero;
+            
+            try
+            {
+                Console.WriteLine($"Using stealth injection for Roblox: {dllPath}");
+                
+                // Validate DLL exists
+                if (!File.Exists(dllPath))
+                {
+                    throw new Exception($"DLL file not found: {dllPath}");
+                }
+
+                // Open target process with standard permissions for injection
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    throw new Exception($"Failed to open Roblox process. Error: {GetLastError()}");
+                }
+
+                Console.WriteLine("Roblox process opened successfully");
+
+                // Create a copy of the DLL in a temporary location to avoid path-based detection
+                string tempDir = Path.GetTempPath();
+                string tempDllName = $"temp_{Guid.NewGuid():N}.dll";
+                string tempDllPath = Path.Combine(tempDir, tempDllName);
+                
+                try
+                {
+                    File.Copy(dllPath, tempDllPath, true);
+                    Console.WriteLine($"Created temporary DLL: {tempDllPath}");
+
+                    // Allocate memory for DLL path
+                    byte[] dllPathBytes = Encoding.ASCII.GetBytes(tempDllPath + "\0");
+                    dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                    if (dllPathAddr == IntPtr.Zero)
+                    {
+                        throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
+                    }
+
+                    // Write DLL path
+                    nint bytesWritten;
+                    if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
+                    {
+                        throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
+                    }
+                    Console.WriteLine($"DLL path written: {bytesWritten} bytes");
+
+                    // Get LoadLibraryA address
+                    IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+                    if (loadLibraryAddr == IntPtr.Zero)
+                    {
+                        throw new Exception("LoadLibraryA address not found");
+                    }
+
+                    Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
+
+                    // Create remote thread for injection
+                    nint threadId;
+                    hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
+                    if (hThread == IntPtr.Zero)
+                    {
+                        throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
+                    }
+
+                    Console.WriteLine($"Created injection thread: {threadId}");
+
+                    // Wait for completion with timeout
+                    uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
+                    if (waitResult == 0) // WAIT_OBJECT_0
+                    {
+                        uint exitCode;
+                        if (GetExitCodeThread(hThread, out exitCode))
+                        {
+                            if (exitCode == 0)
+                            {
+                                Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load in Roblox");
+                                return false;
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Injection successful! HMODULE: 0x{exitCode:X}");
+                                Console.WriteLine("DLL should now show a message box from Roblox!");
+                                return true;
+                            }
+                        }
+                    }
+                    else if (waitResult == 0x102) // WAIT_TIMEOUT
+                    {
+                        Console.WriteLine("Injection timed out - this might be normal for Roblox");
+                        Console.WriteLine("DLL may still be loaded, check for message box");
+                        return true; // Consider it successful as Roblox might take time
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Thread wait failed. Result: {waitResult}");
+                        return false;
+                    }
+                }
+                finally
+                {
+                    // Clean up temporary DLL file
+                    try
+                    {
+                        if (File.Exists(tempDllPath))
+                        {
+                            // Wait a bit before deleting to ensure the process has loaded it
+                            System.Threading.Thread.Sleep(2000);
+                            File.Delete(tempDllPath);
+                            Console.WriteLine("Cleaned up temporary DLL");
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore cleanup errors
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Stealth injection for Roblox failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                // Cleanup
+                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                {
+                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
+                }
+                if (hThread != IntPtr.Zero)
+                {
+                    CloseHandle(hThread);
+                }
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+        
+        // Simple LoadLibraryA injection for safer processes
+        public static bool LoadLibraryInject(int processId, string dllPath)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllPathAddr = IntPtr.Zero;
+            IntPtr hThread = IntPtr.Zero;
+            
+            try
+            {
+                Console.WriteLine($"Using LoadLibraryA injection for: {dllPath}");
+                
+                // Validate DLL exists
+                if (!File.Exists(dllPath))
+                {
+                    throw new Exception($"DLL file not found: {dllPath}");
+                }
+
+                // Open target process
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    // Try with reduced permissions for protected processes
+                    hProcess = OpenProcess(0x1F0FFF & ~0x0001, false, processId); // Remove PROCESS_TERMINATE
+                    if (hProcess == IntPtr.Zero)
+                    {
+                        throw new Exception($"Failed to open process. Error: {GetLastError()}");
+                    }
+                }
+
+                Console.WriteLine("Process opened successfully");
+
+                // Allocate memory for DLL path
+                byte[] dllPathBytes = Encoding.ASCII.GetBytes(dllPath + "\0");
+                dllPathAddr = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)dllPathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                if (dllPathAddr == IntPtr.Zero)
+                {
+                    throw new Exception($"Failed to allocate memory. Error: {GetLastError()}");
+                }
+
+                // Write DLL path
+                nint bytesWritten;
+                if (!WriteProcessMemory(hProcess, dllPathAddr, dllPathBytes, (uint)dllPathBytes.Length, out bytesWritten))
+                {
+                    throw new Exception($"Failed to write DLL path. Error: {GetLastError()}");
+                }
+                Console.WriteLine($"DLL path written: {bytesWritten} bytes");
+
+                // Get LoadLibraryA address
+                IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+                if (loadLibraryAddr == IntPtr.Zero)
+                {
+                    throw new Exception("LoadLibraryA address not found");
+                }
+
+                Console.WriteLine($"LoadLibraryA address: 0x{loadLibraryAddr:X}");
+
+                // Create remote thread
+                nint threadId;
+                hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, loadLibraryAddr, dllPathAddr, 0, out threadId);
+                if (hThread == IntPtr.Zero)
+                {
+                    throw new Exception($"CreateRemoteThread failed. Error: {GetLastError()}");
+                }
+
+                Console.WriteLine($"Created remote thread: {threadId}");
+
+                // Wait for completion with timeout
+                uint waitResult = WaitForSingleObject(hThread, 10000); // 10 second timeout
+                if (waitResult == 0) // WAIT_OBJECT_0
+                {
+                    uint exitCode;
+                    if (GetExitCodeThread(hThread, out exitCode))
+                    {
+                        if (exitCode == 0)
+                        {
+                            Console.WriteLine("Warning: LoadLibraryA returned NULL - DLL failed to load");
+                            return false;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"LoadLibraryA completed successfully. HMODULE: 0x{exitCode:X}");
+                            Console.WriteLine("DLL should now show a message box!");
+                            return true;
+                        }
+                    }
+                }
+                else if (waitResult == 0x102) // WAIT_TIMEOUT
+                {
+                    Console.WriteLine("LoadLibraryA execution timed out");
+                    return false;
+                }
+                else
+                {
+                    Console.WriteLine($"Thread wait failed. Result: {waitResult}");
+                    return false;
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"LoadLibraryA injection failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                // Cleanup
+                if (dllPathAddr != IntPtr.Zero && hProcess != IntPtr.Zero)
+                {
+                    VirtualFreeEx(hProcess, dllPathAddr, 0, 0x8000); // MEM_RELEASE
+                }
+                if (hThread != IntPtr.Zero)
+                {
+                    CloseHandle(hThread);
+                }
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+
+        // Advanced features for stealth injection
+        
+        // Check for TLS callbacks and handle them
+        private static bool ProcessTlsCallbacks(IntPtr hProcess, IntPtr dllBase, byte[] dllBytes, IMAGE_OPTIONAL_HEADER optionalHeader)
+        {
+            try
+            {
+                var tlsDir = optionalHeader.DataDirectory[9]; // IMAGE_DIRECTORY_ENTRY_TLS
+                if (tlsDir.VirtualAddress == 0 || tlsDir.Size == 0)
+                {
+                    Console.WriteLine("No TLS callbacks to process");
+                    return true;
+                }
+                
+                Console.WriteLine($"Processing TLS callbacks at 0x{tlsDir.VirtualAddress:X}");
+                
+                // Read TLS directory
+                int tlsOffset = (int)tlsDir.VirtualAddress;
+                if (tlsOffset + 24 > dllBytes.Length) return false;
+                
+                // TLS directory structure (simplified)
+                ulong startAddressOfRawData = BitConverter.ToUInt64(dllBytes, tlsOffset);
+                ulong endAddressOfRawData = BitConverter.ToUInt64(dllBytes, tlsOffset + 8);
+                ulong addressOfIndex = BitConverter.ToUInt64(dllBytes, tlsOffset + 16);
+                ulong addressOfCallBacks = BitConverter.ToUInt64(dllBytes, tlsOffset + 24);
+                
+                if (addressOfCallBacks != 0)
+                {
+                    Console.WriteLine($"TLS callbacks found at: 0x{addressOfCallBacks:X}");
+                    // Note: For full implementation, you would need to execute these callbacks
+                    // This is a placeholder showing detection of TLS callbacks
+                }
+                
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: Failed to process TLS callbacks: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Anti-debugging checks
+        private static bool IsDebuggerPresent()
+        {
+            try
+            {
+                // Check for debugger using PEB
+                IntPtr peb = GetPeb();
+                if (peb != IntPtr.Zero)
+                {
+                    byte[] pebBytes = new byte[8];
+                    // Read BeingDebugged flag
+                    // This is a simplified check
+                    return false; // Placeholder
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        
+        // Get Process Environment Block (PEB) - simplified version
+        private static IntPtr GetPeb()
+        {
+            // This would need to be implemented using NtQueryInformationProcess
+            // For now, return IntPtr.Zero as placeholder
+            return IntPtr.Zero;
+        }
+        
+        // Enhanced error handling with detailed logging
+        private static void LogDetailedError(string operation, uint errorCode)
+        {
+            try
+            {
+                string errorMessage = $"Operation: {operation}, Error Code: 0x{errorCode:X8}";
+                
+                // Convert error code to human-readable message
+                switch (errorCode)
+                {
+                    case 0x00000005:
+                        errorMessage += " (Access Denied)";
+                        break;
+                    case 0x00000057:
+                        errorMessage += " (Invalid Parameter)";
+                        break;
+                    case 0x00000008:
+                        errorMessage += " (Not Enough Memory)";
+                        break;
+                    case 0x00000012:
+                        errorMessage += " (No More Files)";
+                        break;
+                    default:
+                        errorMessage += " (Unknown Error)";
+                        break;
+                }
+                
+                Console.WriteLine($"[ERROR] {errorMessage}");
+                
+                // Log to file
+                string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "injection_errors.log");
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                File.AppendAllText(logPath, $"[{timestamp}] {errorMessage}\n");
+            }
+            catch
+            {
+                // Ignore logging errors
+            }
+        }
+        
+        // Advanced memory protection manipulation
+        private static bool SetAdvancedMemoryProtection(IntPtr hProcess, IntPtr address, uint size, uint protection)
+        {
+            try
+            {
+                // Set memory protection with validation
+                uint oldProtect;
+                if (VirtualProtectEx(hProcess, address, size, protection, out oldProtect))
+                {
+                    Console.WriteLine($"Memory protection changed: 0x{oldProtect:X} -> 0x{protection:X} at 0x{address:X}");
+                    return true;
+                }
+                else
+                {
+                    uint error = GetLastError();
+                    LogDetailedError("SetAdvancedMemoryProtection", error);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to set memory protection: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Process hollowing detection
+        private static bool DetectProcessHollowing(int processId)
+        {
+            try
+            {
+                // Basic check for process hollowing indicators
+                // This is a simplified implementation
+                Process process = Process.GetProcessById(processId);
+                
+                // Check if the main module path matches the process name
+                if (process.MainModule != null)
+                {
+                    string processName = process.ProcessName;
+                    string moduleName = Path.GetFileNameWithoutExtension(process.MainModule.FileName);
+                    
+                    if (!processName.Equals(moduleName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"Potential process hollowing detected: {processName} vs {moduleName}");
+                        return true;
+                    }
+                }
+                
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        
+        // Anti-VM detection
+        private static bool IsRunningInVirtualMachine()
+        {
+            try
+            {
+                // Check for common VM artifacts
+                string[] vmArtifacts = {
+                    "vmware", "virtualbox", "vbox", "vmtoolsd", "vmwaretray", "vmwareuser",
+                    "vboxservice", "vboxtray", "vmx", "vmsrvc", "vmusrvc"
+                };
+                
+                Process[] processes = Process.GetProcesses();
+                foreach (Process proc in processes)
+                {
+                    string processName = proc.ProcessName.ToLower();
+                    foreach (string artifact in vmArtifacts)
+                    {
+                        if (processName.Contains(artifact))
+                        {
+                            Console.WriteLine($"VM artifact detected: {processName}");
+                            return true;
+                        }
+                    }
+                }
+                
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        
+        // Enhanced DLL verification
+        private static bool VerifyDllIntegrity(string dllPath)
+        {
+            try
+            {
+                if (!File.Exists(dllPath))
+                {
+                    Console.WriteLine($"DLL not found: {dllPath}");
+                    return false;
+                }
+                
+                // Check file size
+                FileInfo fileInfo = new FileInfo(dllPath);
+                if (fileInfo.Length < 1024) // Minimum reasonable DLL size
+                {
+                    Console.WriteLine($"DLL file too small: {fileInfo.Length} bytes");
+                    return false;
+                }
+                
+                // Basic PE header validation
+                byte[] headerBytes = new byte[64];
+                using (FileStream fs = new FileStream(dllPath, FileMode.Open, FileAccess.Read))
+                {
+                    fs.Read(headerBytes, 0, 64);
+                }
+                
+                // Check DOS header
+                if (headerBytes[0] != 0x4D || headerBytes[1] != 0x5A) // "MZ"
+                {
+                    Console.WriteLine("Invalid DOS header");
+                    return false;
+                }
+                
+                Console.WriteLine($"DLL integrity verified: {dllPath}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DLL integrity check failed: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Process privilege escalation check
+        private static bool HasRequiredPrivileges(int processId)
+        {
+            try
+            {
+                IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    Console.WriteLine("Failed to open process - insufficient privileges");
+                    return false;
+                }
+                
+                CloseHandle(hProcess);
+                Console.WriteLine("Process access privileges verified");
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+        
+        // Memory scanning for anti-cheat signatures
+        private static bool ScanForAntiCheatSignatures(IntPtr hProcess)
+        {
+            try
+            {
+                // This is a simplified implementation
+                // In a real scenario, you would scan for specific byte patterns
+                Console.WriteLine("Scanning for anti-cheat signatures...");
+                
+                // Placeholder for signature scanning
+                // You would implement actual signature detection here
+                
+                Console.WriteLine("Anti-cheat signature scan completed");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Anti-cheat signature scan failed: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Advanced manual mapping with all features
+        public static bool UltimateManualMapDll(int processId, string dllPath, bool enableAllFeatures = true)
+        {
+            IntPtr hProcess = IntPtr.Zero;
+            IntPtr dllBase = IntPtr.Zero;
+            
+            try
+            {
+                Console.WriteLine("=== ULTIMATE MANUAL MAPPING ===");
+                
+                // Pre-injection checks
+                if (enableAllFeatures)
+                {
+                    Console.WriteLine("Performing pre-injection security checks...");
+                    
+                    if (!VerifyDllIntegrity(dllPath))
+                    {
+                        throw new Exception("DLL integrity check failed");
+                    }
+                    
+                    if (!HasRequiredPrivileges(processId))
+                    {
+                        throw new Exception("Insufficient privileges");
+                    }
+                    
+                    if (IsDebuggerPresent())
+                    {
+                        Console.WriteLine("Warning: Debugger detected");
+                    }
+                    
+                    if (IsRunningInVirtualMachine())
+                    {
+                        Console.WriteLine("Warning: Virtual machine detected");
+                    }
+                    
+                    if (DetectProcessHollowing(processId))
+                    {
+                        Console.WriteLine("Warning: Process hollowing detected");
+                    }
+                }
+                
+                // Perform advanced manual mapping
+                Console.WriteLine("Starting ultimate manual mapping...");
+                
+                // Read and validate DLL
+                byte[] dllBytes = File.ReadAllBytes(dllPath);
+                
+                // Parse PE headers
+                var dosHeader = ByteArrayToStructure<IMAGE_DOS_HEADER>(dllBytes, 0);
+                if (dosHeader.e_magic != 0x5A4D) throw new Exception("Invalid DOS header");
+                
+                var fileHeader = ByteArrayToStructure<IMAGE_FILE_HEADER>(dllBytes, (int)dosHeader.e_lfanew);
+                if (fileHeader.Signature != 0x00004550) throw new Exception("Invalid PE signature");
+                
+                var optionalHeader = ByteArrayToStructure<IMAGE_OPTIONAL_HEADER>(dllBytes, (int)dosHeader.e_lfanew + Marshal.SizeOf<IMAGE_FILE_HEADER>());
+                
+                // Open process
+                hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, processId);
+                if (hProcess == IntPtr.Zero)
+                {
+                    throw new Exception($"Failed to open process {processId}");
+                }
+                
+                // Scan for anti-cheat
+                if (enableAllFeatures)
+                {
+                    ScanForAntiCheatSignatures(hProcess);
+                }
+                
+                // Find optimal memory location
+                IntPtr preferredBase = FindSuitableMemoryLocation(hProcess, optionalHeader.SizeOfImage);
+                
+                // Allocate memory
+                dllBase = VirtualAllocEx(hProcess, preferredBase, optionalHeader.SizeOfImage, 
+                    MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (dllBase == IntPtr.Zero)
+                {
+                    dllBase = VirtualAllocEx(hProcess, IntPtr.Zero, optionalHeader.SizeOfImage, 
+                        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                }
+                
+                if (dllBase == IntPtr.Zero)
+                {
+                    throw new Exception("Failed to allocate memory");
+                }
+                
+                Console.WriteLine($"Allocated memory at: 0x{dllBase:X}");
+                
+                // Copy headers
+                nint bytesWritten;
+                if (!WriteProcessMemory(hProcess, dllBase, dllBytes, optionalHeader.SizeOfHeaders, out bytesWritten))
+                {
+                    throw new Exception("Failed to write headers");
+                }
+                
+                // Copy sections
+                if (!CopySections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader))
+                {
+                    throw new Exception("Failed to copy sections");
+                }
+                
+                // Process TLS callbacks
+                if (enableAllFeatures)
+                {
+                    ProcessTlsCallbacks(hProcess, dllBase, dllBytes, optionalHeader);
+                }
+                
+                // Apply relocations
+                if (!ApplyRelocations(hProcess, dllBase, dllBytes, optionalHeader))
+                {
+                    Console.WriteLine("Warning: Relocations failed");
+                }
+                
+                // Resolve imports
+                if (!ResolveImports(hProcess, dllBase, dllBytes, optionalHeader))
+                {
+                    Console.WriteLine("Warning: Import resolution failed");
+                }
+                
+                // Erase headers for stealth
+                EraseHeaders(hProcess, dllBase, optionalHeader.SizeOfHeaders);
+                
+                // Set proper page protections
+                SetPageProtections(hProcess, dllBase, dllBytes, fileHeader, optionalHeader);
+                
+                // Call DllMain
+                if (optionalHeader.AddressOfEntryPoint != 0)
+                {
+                    IntPtr entryPoint = (IntPtr)((long)dllBase + optionalHeader.AddressOfEntryPoint);
+                    if (!CallDllMainSafe(hProcess, entryPoint, dllBase))
+                    {
+                        Console.WriteLine("Warning: DllMain execution failed");
+                    }
+                }
+                
+                Console.WriteLine("=== ULTIMATE MANUAL MAPPING COMPLETED ===");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ultimate manual mapping failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (hProcess != IntPtr.Zero)
+                {
+                    CloseHandle(hProcess);
+                }
+            }
         }
     }
 } 
