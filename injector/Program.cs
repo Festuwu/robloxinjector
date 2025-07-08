@@ -46,14 +46,23 @@ namespace Injector
 
             try
             {
-                // Parse command line arguments
-                int targetPid = -1;
-                bool suspendNtdll = true;
-                bool permanentSuspension = true;
-                int suspensionDuration = 0;
-                List<string> dllsToSuspend = new List<string>();
+                // Display usage if no arguments provided
+                if (args.Length == 0)
+                {
+                    DisplayUsage();
+                    return;
+                }
 
-                if (args.Length > 0)
+                // Parse command line arguments: [pid] [ntdll suspension] [other dlls to suspend] [use full manual mapper]
+                int targetPid = -1;
+                bool suspendNtdll = false;
+                bool permanentNtdllSuspension = false;
+                int ntdllSuspensionDuration = 0;
+                List<string> dllsToSuspend = new List<string>();
+                bool useFullManualMapper = false;
+
+                // Parse PID (required)
+                if (args.Length >= 1)
                 {
                     if (int.TryParse(args[0], out int pid))
                     {
@@ -61,117 +70,204 @@ namespace Injector
                     }
                     else
                     {
-                        Console.WriteLine("Invalid PID. Using default Roblox process.");
-                        targetPid = FindRobloxProcess();
-                    }
-
-                    // Parse suspension options
-                    if (args.Length > 1)
-                    {
-                        string suspensionArg = args[1].ToLower();
-                        if (suspensionArg == "false" || suspensionArg == "none")
-                        {
-                            suspendNtdll = false;
-                        }
-                        else if (suspensionArg == "timed")
-                        {
-                            suspendNtdll = true;
-                            permanentSuspension = false;
-                            if (args.Length > 2 && int.TryParse(args[2], out int duration))
-                            {
-                                suspensionDuration = duration;
-                            }
-                            else
-                            {
-                                suspensionDuration = 5000; // Default 5 seconds
-                            }
-                        }
-                        else if (suspensionArg == "permanent" || suspensionArg == "true")
-                        {
-                            suspendNtdll = true;
-                            permanentSuspension = true;
-                        }
-                    }
-
-                    // Parse additional DLLs to suspend
-                    for (int i = 2; i < args.Length; i++)
-                    {
-                        if (args[i].StartsWith("--suspend:"))
-                        {
-                            string dllName = args[i].Substring(10);
-                            dllsToSuspend.Add(dllName);
-                        }
+                        Console.WriteLine($"Invalid PID: {args[0]}");
+                        Console.WriteLine("PID must be a valid integer.");
+                        return;
                     }
                 }
-                else
+
+                // Parse ntdll suspension (optional)
+                if (args.Length >= 2)
                 {
-                    // Default behavior: find Roblox and use permanent ntdll suspension
-                    targetPid = FindRobloxProcess();
-                    suspendNtdll = true;
-                    permanentSuspension = true;
+                    string suspensionArg = args[1].ToLower();
+                    if (suspensionArg == "perm" || suspensionArg == "permanent")
+                    {
+                        suspendNtdll = true;
+                        permanentNtdllSuspension = true;
+                        Console.WriteLine("NTDLL suspension: Permanent");
+                    }
+                    else if (suspensionArg == "none" || suspensionArg == "false")
+                    {
+                        suspendNtdll = false;
+                        Console.WriteLine("NTDLL suspension: Disabled");
+                    }
+                    else if (suspensionArg.EndsWith("s"))
+                    {
+                        // Parse duration in seconds (e.g., "5s", "10s")
+                        string durationStr = suspensionArg.Substring(0, suspensionArg.Length - 1);
+                        if (int.TryParse(durationStr, out int duration))
+                        {
+                            suspendNtdll = true;
+                            permanentNtdllSuspension = false;
+                            ntdllSuspensionDuration = duration * 1000; // Convert to milliseconds
+                            Console.WriteLine($"NTDLL suspension: {duration} seconds");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Invalid suspension duration: {args[1]}");
+                            Console.WriteLine("Duration must be a number followed by 's' (e.g., '5s', '10s')");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Invalid suspension parameter: {args[1]}");
+                        Console.WriteLine("Valid options: 'perm', 'permanent', 'none', 'false', or duration like '5s', '10s'");
+                        return;
+                    }
                 }
 
+                // Parse other DLLs to suspend (optional)
+                if (args.Length >= 3)
+                {
+                    string dllsArg = args[2];
+                    if (dllsArg.ToLower() != "none" && dllsArg.ToLower() != "false")
+                    {
+                        // Split by comma for multiple DLLs
+                        string[] dlls = dllsArg.Split(',');
+                        foreach (string dll in dlls)
+                        {
+                            string trimmedDll = dll.Trim();
+                            if (!string.IsNullOrEmpty(trimmedDll))
+                            {
+                                dllsToSuspend.Add(trimmedDll);
+                            }
+                        }
+                        Console.WriteLine($"Additional DLLs to suspend: {string.Join(", ", dllsToSuspend)}");
+                    }
+                }
+
+                // Parse use full manual mapper (optional)
+                if (args.Length >= 4)
+                {
+                    string mapperArg = args[3].ToLower();
+                    if (mapperArg == "true" || mapperArg == "yes" || mapperArg == "1" || mapperArg == "full")
+                    {
+                        useFullManualMapper = true;
+                        Console.WriteLine("Using full manual mapper");
+                    }
+                    else if (mapperArg == "advanced" || mapperArg == "stealth")
+                    {
+                        useFullManualMapper = true;
+                        Console.WriteLine("Using advanced stealth manual mapper");
+                    }
+                    else if (mapperArg == "ultimate" || mapperArg == "max")
+                    {
+                        useFullManualMapper = true;
+                        Console.WriteLine("Using ultimate manual mapper with all features");
+                    }
+                    else
+                    {
+                        useFullManualMapper = false;
+                        Console.WriteLine("Using standard injection methods");
+                    }
+                }
+
+                // Validate target process
                 if (targetPid == -1)
                 {
-                    Console.WriteLine("No target process found.");
-                    File.AppendAllText(logPath, "ERROR: No target process found.\n");
+                    Console.WriteLine("No valid target process specified.");
                     return;
                 }
 
                 Console.WriteLine($"Target PID: {targetPid}");
-                File.AppendAllText(logPath, $"Target PID: {targetPid}\n");
+                LogToFile($"Target PID: {targetPid}");
+
+                // Verify process exists
+                try
+                {
+                    Process.GetProcessById(targetPid);
+                }
+                catch (ArgumentException)
+                {
+                    Console.WriteLine($"Process with PID {targetPid} not found.");
+                    LogToFile($"ERROR: Process with PID {targetPid} not found.");
+                    return;
+                }
 
                 // Get DLL path
                 string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "cat.dll");
                 Console.WriteLine($"Looking for DLL at: {dllPath}");
-                File.AppendAllText(logPath, $"Looking for DLL at: {dllPath}\n");
+                LogToFile($"Looking for DLL at: {dllPath}");
 
                 if (!File.Exists(dllPath))
                 {
                     Console.WriteLine("DLL not found!");
-                    File.AppendAllText(logPath, "ERROR: DLL not found!\n");
+                    LogToFile("ERROR: DLL not found!");
                     return;
                 }
 
                 Console.WriteLine("Attempting DLL injection...");
-                File.AppendAllText(logPath, "Attempting DLL injection...\n");
+                LogToFile("Attempting DLL injection...");
 
-                // Determine injection strategy based on process type
+                // Determine injection strategy
                 bool isRobloxProcess = IsRobloxProcess(targetPid);
                 bool isProtectedProcess = IsProtectedProcess(targetPid);
                 bool injectionSuccess = false;
 
-                // For Roblox, ALWAYS enable ntdll suspension (required for proper injection)
-                if (isRobloxProcess)
+                // Log injection configuration
+                Console.WriteLine($"Process Type: {(isRobloxProcess ? "Roblox" : (isProtectedProcess ? "Protected" : "Standard"))}");
+                Console.WriteLine($"NTDLL Suspension: {(suspendNtdll ? (permanentNtdllSuspension ? "Permanent" : $"{ntdllSuspensionDuration}ms") : "Disabled")}");
+                Console.WriteLine($"Additional DLLs: {(dllsToSuspend.Count > 0 ? string.Join(", ", dllsToSuspend) : "None")}");
+                Console.WriteLine($"Manual Mapper: {(useFullManualMapper ? "Full" : "Standard")}");
+
+                // Apply pre-injection thread suspension if needed
+                if (suspendNtdll && !isRobloxProcess)
                 {
-                    suspendNtdll = true;
-                    if (!permanentSuspension && suspensionDuration == 0)
-                    {
-                        permanentSuspension = true; // Default to permanent for Roblox
-                    }
+                    Console.WriteLine("Suspending NTDLL threads before injection...");
+                    SuspendNtdllThreads(targetPid, permanentNtdllSuspension, ntdllSuspensionDuration);
                 }
 
-                if (isRobloxProcess)
+                // Suspend additional DLL threads if specified
+                foreach (string dllName in dllsToSuspend)
                 {
-                    Console.WriteLine("Detected Roblox process, using simple injection with targeted ntdll suspension...");
-                    File.AppendAllText(logPath, "Using simple injection for Roblox with targeted ntdll suspension to bypass anti-cheat.\n");
+                    Console.WriteLine($"Suspending threads in {dllName}...");
+                    SuspendDllThreads(targetPid, dllName, permanentNtdllSuspension, ntdllSuspensionDuration);
+                }
+
+                // Perform injection based on strategy
+                if (useFullManualMapper)
+                {
+                    Console.WriteLine("Using full manual mapping...");
+                    LogToFile("Using full manual mapping injection.");
                     
-                    // For Roblox, use simple LoadLibraryA injection first (like the working version)
-                    Console.WriteLine("Using simple LoadLibraryA injection for Roblox...");
-                    injectionSuccess = LoadLibraryInject(targetPid, dllPath);
-                    
-                    if (injectionSuccess)
+                    if (args.Length >= 4 && (args[3].ToLower() == "ultimate" || args[3].ToLower() == "max"))
                     {
-                        Console.WriteLine("DLL injected successfully! Now suspending ntdll.dll threads to bypass anti-cheat...");
-                        // Use targeted ntdll suspension AFTER injection (like the working version)
-                        SuspendTargetedNtdllThreads(targetPid);
-                        Console.WriteLine("Targeted ntdll.dll threads suspended.");
+                        injectionSuccess = ManualMapper.UltimateManualMapDll(targetPid, dllPath, true);
+                    }
+                    else if (args.Length >= 4 && (args[3].ToLower() == "advanced" || args[3].ToLower() == "stealth"))
+                    {
+                        injectionSuccess = ManualMapper.AdvancedManualMapDll(targetPid, dllPath, true, true);
                     }
                     else
                     {
-                        Console.WriteLine("Simple injection failed, trying stealth injection...");
+                        injectionSuccess = ManualMapper.ManualMapDll(targetPid, dllPath);
+                    }
+                }
+                else if (isRobloxProcess)
+                {
+                    Console.WriteLine("Detected Roblox process, using optimized injection strategy...");
+                    LogToFile("Using optimized injection strategy for Roblox.");
+                    
+                    // For Roblox, try LoadLibraryA first
+                    Console.WriteLine("Attempting LoadLibraryA injection...");
+                    injectionSuccess = ManualMapper.LoadLibraryInject(targetPid, dllPath);
+                    
+                    if (injectionSuccess)
+                    {
+                        Console.WriteLine("Standard injection successful. Applying post-injection measures...");
+                        // Apply NTDLL suspension AFTER successful injection for Roblox
+                        if (suspendNtdll)
+                        {
+                            Console.WriteLine("Suspending NTDLL threads to bypass anti-cheat...");
+                            SuspendTargetedNtdllThreads(targetPid);
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Standard injection failed, trying stealth injection...");
                         injectionSuccess = ManualMapper.StealthInjectForRoblox(targetPid, dllPath);
-                        if (injectionSuccess)
+                        if (injectionSuccess && suspendNtdll)
                         {
                             SuspendTargetedNtdllThreads(targetPid);
                         }
@@ -179,62 +275,111 @@ namespace Injector
                 }
                 else if (isProtectedProcess)
                 {
-                    Console.WriteLine("Detected protected process, using manual mapping with thread suspension...");
-                    File.AppendAllText(logPath, "Using manual mapping for protected process.\n");
+                    Console.WriteLine("Detected protected process, using advanced injection...");
+                    LogToFile("Using advanced injection for protected process.");
                     
-                    // Suspend threads before injection for protected processes
-                    if (suspendNtdll)
-                    {
-                        SuspendNtdllThreads(targetPid, permanentSuspension, suspensionDuration);
-                    }
-                    
-                    foreach (string dllName in dllsToSuspend)
-                    {
-                        SuspendDllThreads(targetPid, dllName, permanentSuspension, suspensionDuration);
-                    }
-                    
+                    // For protected processes, prefer manual mapping
                     injectionSuccess = ManualMapper.ManualMapDll(targetPid, dllPath);
+                    
+                    if (!injectionSuccess)
+                    {
+                        Console.WriteLine("Manual mapping failed, trying LoadLibraryA...");
+                        injectionSuccess = ManualMapper.LoadLibraryInject(targetPid, dllPath);
+                    }
                 }
                 else
                 {
                     Console.WriteLine("Using standard LoadLibraryA injection...");
-                    File.AppendAllText(logPath, "Using standard LoadLibraryA injection.\n");
+                    LogToFile("Using standard LoadLibraryA injection.");
                     
                     injectionSuccess = ManualMapper.LoadLibraryInject(targetPid, dllPath);
                 }
 
+                // Report results
                 if (injectionSuccess)
                 {
-                    Console.WriteLine("DLL injected successfully!");
-                    File.AppendAllText(logPath, "DLL injected successfully!\n");
+                    Console.WriteLine("=== INJECTION SUCCESSFUL ===");
+                    LogToFile("DLL injected successfully!");
                     
                     // Verify DLL was loaded
-                    Console.WriteLine("Verifying DLL was loaded...");
+                    Console.WriteLine("Verifying DLL injection...");
                     if (IsDllLoaded(targetPid, "cat.dll"))
                     {
-                        Console.WriteLine("DLL verification successful!");
-                        File.AppendAllText(logPath, "DLL verification successful!\n");
+                        Console.WriteLine("✓ DLL verification successful!");
+                        LogToFile("DLL verification successful!");
                     }
                     else
                     {
-                        Console.WriteLine("Warning: Could not verify DLL loading");
-                        File.AppendAllText(logPath, "Warning: Could not verify DLL loading\n");
+                        Console.WriteLine("⚠ Warning: Could not verify DLL loading (this may be normal for some injection methods)");
+                        LogToFile("Warning: Could not verify DLL loading");
                     }
                     
-                    Console.WriteLine("Check for a message box from the target process.");
-                    File.AppendAllText(logPath, "Injection completed successfully.\n");
+                    Console.WriteLine("Check the target process for DLL effects (e.g., message boxes, hooks, etc.)");
+                    LogToFile("Injection completed successfully.");
                 }
                 else
                 {
-                    Console.WriteLine("DLL injection failed!");
-                    File.AppendAllText(logPath, "ERROR: DLL injection failed!\n");
+                    Console.WriteLine("=== INJECTION FAILED ===");
+                    LogToFile("ERROR: DLL injection failed!");
+                    Console.WriteLine("Check the log file for more details.");
+                }
+
+                // Show suspension status
+                if (suspendNtdll && permanentNtdllSuspension)
+                {
+                    Console.WriteLine("Note: NTDLL threads are permanently suspended. Use a process manager to resume if needed.");
+                }
+                else if (suspendNtdll && !permanentNtdllSuspension)
+                {
+                    Console.WriteLine($"Note: NTDLL threads suspended for {ntdllSuspensionDuration}ms and will resume automatically.");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                File.AppendAllText(logPath, $"ERROR: {ex.Message}\n");
+                Console.WriteLine($"Critical Error: {ex.Message}");
+                LogToFile($"CRITICAL ERROR: {ex.Message}");
+                Console.WriteLine("Stack Trace:");
+                Console.WriteLine(ex.StackTrace);
+                LogToFile($"Stack Trace: {ex.StackTrace}");
             }
+            
+            // Keep console open for user to see results
+            Console.WriteLine("\nPress any key to exit...");
+            Console.ReadKey();
+        }
+
+        // Display usage information
+        private static void DisplayUsage()
+        {
+            Console.WriteLine("=== Advanced DLL Injector ===");
+            Console.WriteLine("Usage: Injector.exe [pid] [ntdll_suspension] [other_dlls] [use_full_manual_mapper]");
+            Console.WriteLine();
+            Console.WriteLine("Parameters:");
+            Console.WriteLine("  pid                    - Target process ID (required)");
+            Console.WriteLine("  ntdll_suspension       - NTDLL suspension mode:");
+            Console.WriteLine("                          'perm' or 'permanent' - Permanent suspension");
+            Console.WriteLine("                          'none' or 'false' - No suspension");
+            Console.WriteLine("                          'Xs' (e.g., '5s', '10s') - Suspend for X seconds");
+            Console.WriteLine("  other_dlls            - Other DLLs to suspend (comma-separated) or 'none'");
+            Console.WriteLine("  use_full_manual_mapper - Use full manual mapper:");
+            Console.WriteLine("                          'true', 'yes', '1', 'full' - Use full manual mapper");
+            Console.WriteLine("                          'advanced', 'stealth' - Use advanced stealth manual mapper");
+            Console.WriteLine("                          'ultimate', 'max' - Use ultimate manual mapper (all features)");
+            Console.WriteLine("                          'false', 'no', '0' - Use standard injection");
+            Console.WriteLine();
+            Console.WriteLine("Examples:");
+            Console.WriteLine("  Injector.exe 1234 perm none false");
+            Console.WriteLine("  Injector.exe 1234 5s kernel32.dll,user32.dll true");
+            Console.WriteLine("  Injector.exe 1234 none none advanced");
+            Console.WriteLine("  Injector.exe 1234 permanent advapi32.dll stealth");
+            Console.WriteLine("  Injector.exe 1234 none none ultimate");
+            Console.WriteLine();
+            Console.WriteLine("Notes:");
+            Console.WriteLine("- For Roblox processes, NTDLL suspension is applied AFTER injection");
+            Console.WriteLine("- For protected processes, suspension is applied BEFORE injection");
+            Console.WriteLine("- Manual mapping bypasses most anti-cheat detection");
+            Console.WriteLine("- Advanced stealth mode includes header erasure and memory location obfuscation");
+            Console.WriteLine("- Ultimate mode includes TLS callbacks, anti-VM detection, and comprehensive security checks");
         }
 
         private static bool IsRobloxProcess(int processId)
@@ -356,7 +501,7 @@ namespace Injector
                         IntPtr hThread = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)thread.Id);
                         if (hThread != IntPtr.Zero)
                         {
-                            if (SuspendThread(hThread) != -1)
+                            if (SuspendThread(hThread) != 0xFFFFFFFF)
                             {
                                 suspendedCount++;
                                 Console.WriteLine($"Suspended thread {thread.Id} in {dllName}");
@@ -405,7 +550,7 @@ namespace Injector
                         IntPtr hThread = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)thread.Id);
                         if (hThread != IntPtr.Zero)
                         {
-                            if (ResumeThread(hThread) != -1)
+                            if (ResumeThread(hThread) != 0xFFFFFFFF)
                             {
                                 resumedCount++;
                             }
@@ -618,87 +763,46 @@ namespace Injector
             return false;
         }
 
-        // Targeted ntdll suspension method based on the working version
+        // Targeted ntdll suspension method - exactly like the working old version
         static void SuspendTargetedNtdllThreads(int processId)
         {
-            try
+            var process = Process.GetProcessById(processId);
+
+            foreach (ProcessThread thread in process.Threads)
             {
-                var process = Process.GetProcessById(processId);
-                int suspendedCount = 0;
-
-                foreach (ProcessThread thread in process.Threads)
+                try
                 {
-                    try
-                    {
-                        IntPtr hThread = OpenThread(ThreadAccess.SUSPEND_RESUME | ThreadAccess.QUERY_INFORMATION, false, (uint)thread.Id);
-                        if (hThread == IntPtr.Zero) continue;
+                    IntPtr hThread = OpenThread(ThreadAccess.SUSPEND_RESUME | ThreadAccess.QUERY_INFORMATION, false, (uint)thread.Id);
+                    if (hThread == IntPtr.Zero) continue;
 
-                        // Query thread start address
-                        const int ThreadQuerySetWin32StartAddress = 9;
-                        IntPtr startAddressPtr = Marshal.AllocHGlobal(IntPtr.Size);
-                        try
-                        {
-                            int result = NtQueryInformationThread(hThread, ThreadQuerySetWin32StartAddress, startAddressPtr, IntPtr.Size, IntPtr.Zero);
-                            if (result == 0) // STATUS_SUCCESS
-                            {
-                                IntPtr startAddress = Marshal.ReadIntPtr(startAddressPtr);
-                                
-                                // Check if this thread starts in ntdll.dll
-                                if (IsAddressInNtdll(processId, startAddress))
-                                {
-                                    uint suspendResult = SuspendThread(hThread);
-                                    if (suspendResult != 0xFFFFFFFF) // Not INVALID_HANDLE_VALUE
-                                    {
-                                        suspendedCount++;
-                                        Console.WriteLine($"Suspended ntdll thread {thread.Id} (start: 0x{startAddress:X})");
-                                    }
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(startAddressPtr);
-                            CloseHandle(hThread);
-                        }
-                    }
-                    catch (Exception ex)
+                    const int ThreadQuerySetWin32StartAddress = 9;
+                    IntPtr startAddressPtr = Marshal.AllocHGlobal(IntPtr.Size);
+                    NtQueryInformationThread(hThread, ThreadQuerySetWin32StartAddress, startAddressPtr, IntPtr.Size, IntPtr.Zero);
+                    IntPtr startAddress = Marshal.ReadIntPtr(startAddressPtr);
+                    Marshal.FreeHGlobal(startAddressPtr);
+                    if (IsAddressInNtdll(processId, startAddress))
                     {
-                        Console.WriteLine($"Error processing thread {thread.Id}: {ex.Message}");
+                        SuspendThread(hThread);
                     }
                 }
-
-                Console.WriteLine($"Suspended {suspendedCount} targeted ntdll threads");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Failed to suspend targeted ntdll threads: {ex.Message}");
+                catch { }
             }
         }
 
-        // Check if address is within ntdll.dll module
         static bool IsAddressInNtdll(int processId, IntPtr address)
         {
-            try
+            var process = Process.GetProcessById(processId);
+            foreach (ProcessModule module in process.Modules)
             {
-                var process = Process.GetProcessById(processId);
-                foreach (ProcessModule module in process.Modules)
+                if (module.ModuleName.ToLower().Contains("ntdll"))
                 {
-                    if (module.ModuleName.ToLower().Contains("ntdll"))
-                    {
-                        IntPtr baseAddr = module.BaseAddress;
-                        IntPtr endAddr = (IntPtr)((long)baseAddr + module.ModuleMemorySize);
+                    IntPtr baseAddr = module.BaseAddress;
+                    IntPtr endAddr = (IntPtr)((long)baseAddr + module.ModuleMemorySize);
 
-                        if ((ulong)address.ToInt64() >= (ulong)baseAddr.ToInt64() &&
-                            (ulong)address.ToInt64() <= (ulong)endAddr.ToInt64())
-                        {
-                            return true;
-                        }
-                    }
+                    if ((ulong)address.ToInt64() >= (ulong)baseAddr.ToInt64() &&
+                        (ulong)address.ToInt64() <= (ulong)endAddr.ToInt64())
+                        return true;
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error checking ntdll address: {ex.Message}");
             }
             return false;
         }
